@@ -6,8 +6,12 @@ build = "src/util/build.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.23.1"
 chrono = "0.4"
 crossbeam = "0.8.4"
+ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "pem"] }
+rand = "0.8"
+rsa = { version = "0.9.10", features = ["sha2"] }
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 
