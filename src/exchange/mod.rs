@@ -57,3 +57,6 @@ pub struct Decoded {
     pub sending_ts: Option<DateTime<Utc>>,
     pub event: Event,
 }
+
+pub type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
