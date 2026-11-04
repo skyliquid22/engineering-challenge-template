@@ -5,4 +5,5 @@ pub use side::{InvalidSide, Side};
 
 pub mod auth;
 pub mod book;
+pub mod exchange;
 pub mod fixed;
