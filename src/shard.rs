@@ -5,10 +5,13 @@
 //! switches to a healthy standby and emits a snapshot of every live book
 //! first, as extension 1 requires.
 //!
-//! Subscriptions are paced: the probe showed Kalshi drains one connection at
-//! roughly 2000 frames/s and overflows the subscription's outbound buffer
-//! (error 25) when asked for far more snapshots at once, so subscribe,
-//! add_markets and get_snapshot go out in chunks on a timer.
+//! Subscriptions are flow-controlled: the probe showed Kalshi drains one
+//! connection at roughly 2000 frames/s and overflows the subscription's
+//! outbound buffer (error 25) when asked for far more snapshots at once, and
+//! the first full-universe run showed a fixed timer is not enough on a slow
+//! link. Each source keeps about one request in flight and sends the next
+//! only when those snapshots have arrived, so whatever the pipe delivers sets
+//! the pace and deltas for live books are not stuck behind snapshots.
 //!
 //! Books live here, not in a central store: a single owner, no locks, in-order
 //! processing of one socket's stream, and the minute snapshot is a local
@@ -50,10 +53,6 @@ pub struct ShardConfig {
     pub redundancy: usize,
     pub socket: SocketConfig,
     pub snapshot_every: Duration,
-    /// A source still missing snapshots this long after (re)connecting is
-    /// declared healthy anyway if it has received some; the rest may be
-    /// markets the exchange will never snapshot (closed since discovery).
-    pub sync_grace: Duration,
     pub journal: JournalMode,
     /// Tickers per subscribe / add_markets / get_snapshot command.
     pub subscribe_chunk: usize,
@@ -62,6 +61,10 @@ pub struct ShardConfig {
     /// Shard `i` opens its sockets `i * stagger` after spawn, so dozens of
     /// shards do not all take their initial snapshot burst at once.
     pub stagger: Duration,
+    /// A standby waits for the active source to finish its initial sync (at
+    /// most this long) before subscribing, so startup bandwidth goes to the
+    /// books being written.
+    pub standby_defer: Duration,
 }
 
 pub struct ShardHandle {
@@ -99,6 +102,11 @@ struct Source {
     to_subscribe: VecDeque<Symbol>,
     /// Books to re-request snapshots for; drained by the pacer in chunks.
     to_snapshot: VecDeque<Symbol>,
+    /// Snapshots requested (subscribe/add/get_snapshot) but not yet received.
+    outstanding: usize,
+    last_request_at: Instant,
+    last_snapshot_at: Instant,
+    connected_at: Instant,
     syncing: usize,
     health: Health,
     unhealthy_since: Instant,
@@ -131,6 +139,22 @@ impl Source {
 
     fn send(&self, text: String) {
         let _ = self.cmds.send(SocketCmd::Send(text));
+    }
+
+    /// Nothing queued and nothing in flight: the books are whatever the
+    /// exchange was willing to send.
+    fn settled(&self) -> bool {
+        self.connected
+            && self.to_subscribe.is_empty()
+            && self.to_snapshot.is_empty()
+            && self.outstanding == 0
+    }
+
+    fn update_health(&mut self) {
+        if self.settled() && self.health != Health::Healthy {
+            let still = self.syncing;
+            self.set_health(Health::Healthy, &format!("synced ({still} books never snapshotted)"));
+        }
     }
 }
 
@@ -187,6 +211,10 @@ pub fn spawn_shard(
             subscribed: HashSet::new(),
             to_subscribe: VecDeque::new(),
             to_snapshot: VecDeque::new(),
+            outstanding: 0,
+            last_request_at: Instant::now(),
+            last_snapshot_at: Instant::now(),
+            connected_at: Instant::now(),
             syncing: 0,
             health: Health::Syncing,
             unhealthy_since: Instant::now(),
@@ -345,6 +373,10 @@ impl Engine {
                 s.pending.clear();
                 s.to_snapshot.clear();
                 s.to_subscribe = self.symbols.iter().cloned().collect();
+                s.outstanding = 0;
+                s.connected_at = Instant::now();
+                s.last_request_at = s.connected_at;
+                s.last_snapshot_at = s.connected_at;
                 s.snapshots_since_connect = 0;
                 s.last_frame = Some(Instant::now());
                 s.mark_all_syncing();
@@ -361,6 +393,7 @@ impl Engine {
                 s.sid = None;
                 s.to_subscribe.clear();
                 s.to_snapshot.clear();
+                s.outstanding = 0;
                 s.mark_all_syncing();
                 s.set_health(Health::Failed, &format!("disconnected: {reason}"));
             }
@@ -442,9 +475,9 @@ impl Engine {
                     s.syncing = s.syncing.saturating_sub(1);
                 }
                 s.snapshots_since_connect += 1;
-                if s.syncing == 0 && s.health != Health::Healthy {
-                    s.set_health(Health::Healthy, "all books synced");
-                }
+                s.outstanding = s.outstanding.saturating_sub(1);
+                s.last_snapshot_at = Instant::now();
+                s.update_health();
                 if let Some(snap) = snap {
                     self.emit(Out::Snapshot(snap));
                 }
@@ -514,6 +547,7 @@ impl Engine {
         let s = &mut self.sources[source];
         s.mark_all_syncing();
         s.set_health(Health::Failed, reason);
+        s.outstanding = 0;
         if s.sid.is_some() {
             // Only books the server knows about can be re-snapshotted.
             s.to_snapshot = s.subscribed.iter().cloned().collect();
@@ -526,12 +560,40 @@ impl Engine {
     /// source has no subscription yet, `add_markets` for queued symbols, or
     /// `get_snapshot` for books waiting to be resynced.
     fn pace(&mut self) {
+        const STALL: Duration = Duration::from_secs(10);
         let chunk = self.cfg.subscribe_chunk.max(1);
+        let now = Instant::now();
+        let active = self.active;
+        let active_ready = self.sources[active].health == Health::Healthy;
         for i in 0..self.sources.len() {
             let s = &self.sources[i];
             if !s.connected {
                 continue;
             }
+            // Standbys let the active source sync first.
+            if i != active
+                && !active_ready
+                && s.subscribed.is_empty()
+                && now.duration_since(s.connected_at) < self.cfg.standby_defer
+            {
+                continue;
+            }
+            // Flow control: about one chunk in flight per source. Whatever the
+            // pipe delivers sets the pace, so exchange-side queues stay short
+            // and deltas for live books are not stuck behind snapshots.
+            if s.outstanding > chunk / 4 {
+                let stalled = now.duration_since(s.last_request_at) > STALL
+                    && now.duration_since(s.last_snapshot_at) > STALL;
+                if !stalled {
+                    continue;
+                }
+                // The rest of that chunk is not coming (markets closed since
+                // discovery, or a request the exchange ignored); move on.
+                tracing::debug!(shard = self.id, source = i, outstanding = s.outstanding, "snapshot stall; writing off outstanding");
+                self.sources[i].outstanding = 0;
+                self.sources[i].update_health();
+            }
+            let s = &self.sources[i];
             match s.sid {
                 None => {
                     if s.to_subscribe.is_empty()
@@ -542,6 +604,8 @@ impl Engine {
                     let s = &mut self.sources[i];
                     let batch: Vec<Symbol> = s.to_subscribe.drain(..chunk.min(s.to_subscribe.len())).collect();
                     s.subscribed.extend(batch.iter().cloned());
+                    s.outstanding += batch.len();
+                    s.last_request_at = now;
                     let text = self.ex.subscribe_books(self.next_id, &batch);
                     self.send(i, Pending::Subscribe, text);
                 }
@@ -550,11 +614,15 @@ impl Engine {
                         let s = &mut self.sources[i];
                         let batch: Vec<Symbol> = s.to_subscribe.drain(..chunk.min(s.to_subscribe.len())).collect();
                         s.subscribed.extend(batch.iter().cloned());
+                        s.outstanding += batch.len();
+                        s.last_request_at = now;
                         let text = self.ex.add_markets(self.next_id, sid, &batch);
                         self.send(i, Pending::Add, text);
                     } else if !s.to_snapshot.is_empty() {
                         let s = &mut self.sources[i];
                         let batch: Vec<Symbol> = s.to_snapshot.drain(..chunk.min(s.to_snapshot.len())).collect();
+                        s.outstanding += batch.len();
+                        s.last_request_at = now;
                         let text = self.ex.get_snapshot(self.next_id, sid, &batch);
                         self.send(i, Pending::GetSnapshot, text);
                     }
@@ -605,21 +673,8 @@ impl Engine {
     }
 
     fn health_check(&mut self) {
-        let now = Instant::now();
-        let grace = self.cfg.sync_grace;
         for s in &mut self.sources {
-            if !s.connected || s.health == Health::Healthy {
-                continue;
-            }
-            if s.syncing == 0 {
-                s.set_health(Health::Healthy, "all books synced");
-            } else if s.snapshots_since_connect > 0
-                && now.duration_since(s.unhealthy_since) > grace
-                && s.last_frame.is_some_and(|t| now.duration_since(t) < Duration::from_secs(5))
-            {
-                let still = s.syncing;
-                s.set_health(Health::Healthy, &format!("grace elapsed with {still} books still syncing"));
-            }
+            s.update_health();
         }
         self.maybe_failover();
         // Gauges describe the active source.

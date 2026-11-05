@@ -95,10 +95,11 @@ pub struct Config {
     #[arg(long)]
     pub symbols_file: Option<PathBuf>,
 
-    /// Tickers per subscribe/add/get_snapshot command (paced every
-    /// --pace-ms). The probe showed one connection drains ~2000 frames/s and
-    /// a far larger snapshot burst overflows Kalshi's buffer (error 25).
-    #[arg(long, default_value_t = 400)]
+    /// Tickers per subscribe/add/get_snapshot request. Each socket keeps
+    /// about one request in flight; the probe showed one connection drains
+    /// ~2000 frames/s and a far larger snapshot burst overflows Kalshi's
+    /// buffer (error 25).
+    #[arg(long, default_value_t = 200)]
     pub subscribe_chunk: usize,
 
     #[arg(long, default_value_t = 250)]
@@ -108,6 +109,11 @@ pub struct Config {
     /// snapshot bursts of ~90 sockets over the downlink.
     #[arg(long, default_value_t = 500)]
     pub shard_stagger_ms: u64,
+
+    /// A standby waits up to this long for the active source to finish its
+    /// initial sync before subscribing itself.
+    #[arg(long, default_value_t = 600)]
+    pub standby_defer_secs: u64,
 }
 
 impl Config {
@@ -124,7 +130,6 @@ impl Config {
             redundancy: self.redundancy.max(1),
             socket: self.socket(),
             snapshot_every: Duration::from_secs(self.snapshot_every_secs.max(1)),
-            sync_grace: Duration::from_secs(20),
             journal: match self.journal {
                 JournalArg::Off => JournalMode::Off,
                 JournalArg::Active => JournalMode::Active,
@@ -133,6 +138,7 @@ impl Config {
             subscribe_chunk: self.subscribe_chunk,
             pace: Duration::from_millis(self.pace_ms),
             stagger: Duration::from_millis(self.shard_stagger_ms),
+            standby_defer: Duration::from_secs(self.standby_defer_secs),
         }
     }
 
