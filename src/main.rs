@@ -132,6 +132,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         written = metrics.msgs_written.get(),
         bytes = metrics.bytes_written.get(),
         reconnects = metrics.reconnects.get(),
+        failovers = metrics.failovers.get(),
         gaps = metrics.gaps.get(),
         "clean shutdown"
     );

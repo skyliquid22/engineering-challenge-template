@@ -54,6 +54,7 @@ pub struct Metrics {
     pub gaps: Counter,
     pub resyncs: Counter,
     pub reconnects: Counter,
+    pub failovers: Counter,
     pub ws_errors: Counter,
     pub decode_errors: Counter,
     pub exchange_errors: Counter,
@@ -123,15 +124,16 @@ impl Metrics {
                 snaps_s = format_args!("{:.1}", rate(2)),
                 deltas_s = format_args!("{:.0}", rate(3)),
                 applied_s = format_args!("{:.0}", rate(4)),
-                written_s = format_args!("{:.0}", rate(12)),
+                written_s = format_args!("{:.0}", rate(13)),
                 dropped = cur[5],
                 gaps = cur[6],
                 resyncs = cur[7],
                 reconnects = cur[8],
-                ws_err = cur[9],
-                decode_err = cur[10],
-                exch_err = cur[11],
-                mib_written = format_args!("{:.1}", cur[13] as f64 / 1048576.0),
+                failovers = cur[9],
+                ws_err = cur[10],
+                decode_err = cur[11],
+                exch_err = cur[12],
+                mib_written = format_args!("{:.1}", cur[14] as f64 / 1048576.0),
                 symbols = self.symbols.get(),
                 live = self.books_live.get(),
                 syncing = self.books_syncing.get(),
@@ -146,7 +148,7 @@ impl Metrics {
         }
     }
 
-    fn counters(&self) -> [u64; 14] {
+    fn counters(&self) -> [u64; 15] {
         [
             self.frames.get(),
             self.bytes_in.get(),
@@ -157,6 +159,7 @@ impl Metrics {
             self.gaps.get(),
             self.resyncs.get(),
             self.reconnects.get(),
+            self.failovers.get(),
             self.ws_errors.get(),
             self.decode_errors.get(),
             self.exchange_errors.get(),

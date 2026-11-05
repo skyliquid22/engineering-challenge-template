@@ -7,7 +7,7 @@ use clap::{Parser, ValueEnum};
 
 use crate::exchange::kalshi::{DEFAULT_REST_URL, DEFAULT_WS_URL};
 use crate::journal::JournalConfig;
-use crate::shard::ShardConfig;
+use crate::shard::{JournalMode, ShardConfig};
 use crate::socket::SocketConfig;
 use crate::universe::UniverseConfig;
 use crate::writer::{Sink, WriterConfig};
@@ -15,7 +15,8 @@ use crate::writer::{Sink, WriterConfig};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum JournalArg {
     Off,
-    On,
+    Active,
+    All,
 }
 
 /// Collects every live Kalshi order book into aligned SBE files.
@@ -43,10 +44,10 @@ pub struct Config {
     #[arg(long, default_value = "kalshi-orderbook")]
     pub prefix: String,
 
-    /// Raw frame journal: every frame with its receive timestamp, one JSON
-    /// line each. Bounds crash loss to about a second, since the SBE writer
-    /// holds a whole 64 MiB chunk in memory.
-    #[arg(long, value_enum, default_value_t = JournalArg::On)]
+    /// Raw frame journal: off, active (frames that produced the output), all
+    /// (every socket). Bounds crash loss to about a second, since the SBE
+    /// writer holds a whole 64 MiB chunk in memory.
+    #[arg(long, value_enum, default_value_t = JournalArg::Active)]
     pub journal: JournalArg,
 
     /// Journal directory (default: <out>/journal).
@@ -55,8 +56,8 @@ pub struct Config {
 
     /// Markets per subscription (= per socket). Kalshi accepted all 176k open
     /// markets on one subscription in the probe, so this is a throughput
-    /// knob: 4000 gives ~45 shards, well under the Basic tier connection
-    /// limit (200 at the time of writing, per the "WebSocket connection
+    /// knob: 4000 gives ~45 shards, 90 sockets with redundancy 2, well under
+    /// the Basic tier connection limit (200 at the time of writing, per the "WebSocket connection
     /// limits" section of https://docs.kalshi.com/getting_started/rate_limits).
     #[arg(long, default_value_t = 4000)]
     pub markets_per_socket: usize,
@@ -66,6 +67,10 @@ pub struct Config {
     /// https://docs.kalshi.com/getting_started/rate_limits).
     #[arg(long, default_value_t = 95)]
     pub max_shards: usize,
+
+    /// Redundant sockets per shard (extension 1). 1 disables redundancy.
+    #[arg(long, default_value_t = 2)]
+    pub redundancy: usize,
 
     #[arg(long, default_value_t = 60)]
     pub snapshot_every_secs: u64,
@@ -101,8 +106,15 @@ impl Config {
 
     pub fn shard(&self) -> ShardConfig {
         ShardConfig {
+            redundancy: self.redundancy.max(1),
             socket: self.socket(),
             snapshot_every: Duration::from_secs(self.snapshot_every_secs.max(1)),
+            sync_grace: Duration::from_secs(20),
+            journal: match self.journal {
+                JournalArg::Off => JournalMode::Off,
+                JournalArg::Active => JournalMode::Active,
+                JournalArg::All => JournalMode::All,
+            },
         }
     }
 
