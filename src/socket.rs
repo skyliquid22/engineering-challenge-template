@@ -48,6 +48,9 @@ pub struct SocketConfig {
     /// No frame of any kind (pings included) for this long means the
     /// connection is dead even if TCP says otherwise.
     pub silence_timeout: Duration,
+    /// Wait this long before the very first connect, so dozens of shards do
+    /// not all take their initial snapshot burst through one downlink at once.
+    pub initial_connect_delay: Duration,
     pub max_backoff: Duration,
 }
 
@@ -55,6 +58,7 @@ impl Default for SocketConfig {
     fn default() -> Self {
         Self {
             silence_timeout: Duration::from_secs(30),
+            initial_connect_delay: Duration::ZERO,
             max_backoff: Duration::from_secs(30),
         }
     }
@@ -79,6 +83,12 @@ pub async fn run_socket(
 ) {
     let mut backoff = Duration::from_secs(1);
     let mut conn: u64 = 0;
+    if !cfg.initial_connect_delay.is_zero() {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(cfg.initial_connect_delay) => {}
+        }
+    }
     while !cancel.is_cancelled() {
         let ws = tokio::select! {
             _ = cancel.cancelled() => return,

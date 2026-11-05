@@ -94,12 +94,27 @@ pub struct Config {
     /// Collect only these tickers (one per line) instead of discovering.
     #[arg(long)]
     pub symbols_file: Option<PathBuf>,
+
+    /// Tickers per subscribe/add/get_snapshot command (paced every
+    /// --pace-ms). The probe showed one connection drains ~2000 frames/s and
+    /// a far larger snapshot burst overflows Kalshi's buffer (error 25).
+    #[arg(long, default_value_t = 400)]
+    pub subscribe_chunk: usize,
+
+    #[arg(long, default_value_t = 250)]
+    pub pace_ms: u64,
+
+    /// Shard i opens its sockets i * this after spawn, spreading the initial
+    /// snapshot bursts of ~90 sockets over the downlink.
+    #[arg(long, default_value_t = 500)]
+    pub shard_stagger_ms: u64,
 }
 
 impl Config {
     pub fn socket(&self) -> SocketConfig {
         SocketConfig {
             silence_timeout: Duration::from_secs(self.silence_timeout_secs.max(5)),
+            initial_connect_delay: Duration::ZERO,
             max_backoff: Duration::from_secs(30),
         }
     }
@@ -115,6 +130,9 @@ impl Config {
                 JournalArg::Active => JournalMode::Active,
                 JournalArg::All => JournalMode::All,
             },
+            subscribe_chunk: self.subscribe_chunk,
+            pace: Duration::from_millis(self.pace_ms),
+            stagger: Duration::from_millis(self.shard_stagger_ms),
         }
     }
 

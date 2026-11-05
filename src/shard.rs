@@ -5,11 +5,16 @@
 //! switches to a healthy standby and emits a snapshot of every live book
 //! first, as extension 1 requires.
 //!
+//! Subscriptions are paced: the probe showed Kalshi drains one connection at
+//! roughly 2000 frames/s and overflows the subscription's outbound buffer
+//! (error 25) when asked for far more snapshots at once, so subscribe,
+//! add_markets and get_snapshot go out in chunks on a timer.
+//!
 //! Books live here, not in a central store: a single owner, no locks, in-order
 //! processing of one socket's stream, and the minute snapshot is a local
 //! iteration.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -50,6 +55,13 @@ pub struct ShardConfig {
     /// markets the exchange will never snapshot (closed since discovery).
     pub sync_grace: Duration,
     pub journal: JournalMode,
+    /// Tickers per subscribe / add_markets / get_snapshot command.
+    pub subscribe_chunk: usize,
+    /// Interval between chunks, per source.
+    pub pace: Duration,
+    /// Shard `i` opens its sockets `i * stagger` after spawn, so dozens of
+    /// shards do not all take their initial snapshot burst at once.
+    pub stagger: Duration,
 }
 
 pub struct ShardHandle {
@@ -83,6 +95,10 @@ struct Source {
     books: HashMap<Symbol, Book>,
     /// Symbols the server has been told about on the current connection.
     subscribed: HashSet<Symbol>,
+    /// Not yet told; drained by the pacer in chunks.
+    to_subscribe: VecDeque<Symbol>,
+    /// Books to re-request snapshots for; drained by the pacer in chunks.
+    to_snapshot: VecDeque<Symbol>,
     syncing: usize,
     health: Health,
     unhealthy_since: Instant,
@@ -148,6 +164,9 @@ pub fn spawn_shard(
     for s in 0..cfg.redundancy.max(1) {
         let (tx, rx) = mpsc::unbounded_channel();
         let label = format!("shard{id}/{s}");
+        let mut socket_cfg = cfg.socket.clone();
+        socket_cfg.initial_connect_delay =
+            cfg.stagger * id as u32 + cfg.stagger * s as u32 / cfg.redundancy.max(1) as u32;
         tokio::spawn(run_socket(
             ex.clone(),
             s,
@@ -155,7 +174,7 @@ pub fn spawn_shard(
             rx,
             sock_tx.clone(),
             cancel.child_token(),
-            cfg.socket.clone(),
+            socket_cfg,
             metrics.clone(),
         ));
         sources.push(Source {
@@ -166,6 +185,8 @@ pub fn spawn_shard(
             next_seq: None,
             books: HashMap::new(),
             subscribed: HashSet::new(),
+            to_subscribe: VecDeque::new(),
+            to_snapshot: VecDeque::new(),
             syncing: 0,
             health: Health::Syncing,
             unhealthy_since: Instant::now(),
@@ -212,6 +233,8 @@ impl Engine {
             tokio::time::interval_at(next_boundary(self.cfg.snapshot_every), self.cfg.snapshot_every);
         snap_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut health_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut pace_tick = tokio::time::interval(self.cfg.pace.max(Duration::from_millis(20)));
+        pace_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
@@ -224,6 +247,7 @@ impl Engine {
                     Some(msg) => self.on_socket(msg),
                     None => break,
                 },
+                _ = pace_tick.tick() => self.pace(),
                 _ = snap_tick.tick() => self.periodic_snapshots(),
                 _ = health_tick.tick() => self.health_check(),
             }
@@ -250,16 +274,6 @@ impl Engine {
         s.send(text);
     }
 
-    fn subscribe_all(&mut self, i: usize) {
-        if self.symbols.is_empty() {
-            return;
-        }
-        let all: Vec<Symbol> = self.symbols.iter().cloned().collect();
-        let text = self.ex.subscribe_books(self.next_id, &all);
-        self.send(i, Pending::Subscribe, text);
-        self.sources[i].subscribed = self.symbols.clone();
-    }
-
     fn on_cmd(&mut self, cmd: ShardCmd) {
         match cmd {
             ShardCmd::Add(symbols) => {
@@ -277,27 +291,12 @@ impl Engine {
                     return;
                 }
                 self.metrics.symbols.add(added.len() as i64);
-                for i in 0..self.sources.len() {
-                    let s = &self.sources[i];
-                    match s.sid {
-                        Some(sid) => {
-                            let new: Vec<Symbol> =
-                                added.iter().filter(|x| !s.subscribed.contains(*x)).cloned().collect();
-                            if !new.is_empty() {
-                                let text = self.ex.add_markets(self.next_id, sid, &new);
-                                self.send(i, Pending::Add, text);
-                                self.sources[i].subscribed.extend(new);
-                            }
-                        }
-                        None => {
-                            // Connected before we had any symbols: subscribe now.
-                            let in_flight = s.pending.values().any(|p| matches!(p, Pending::Subscribe));
-                            if s.connected && s.subscribed.is_empty() && !in_flight {
-                                self.subscribe_all(i);
-                            }
-                        }
+                for s in &mut self.sources {
+                    if s.connected {
+                        s.to_subscribe.extend(added.iter().cloned());
                     }
                 }
+                self.pace();
             }
             ShardCmd::Remove(symbols) => {
                 let mut removed = Vec::new();
@@ -319,6 +318,11 @@ impl Engine {
                 self.metrics.symbols.add(-(removed.len() as i64));
                 for i in 0..self.sources.len() {
                     let s = &mut self.sources[i];
+                    if !s.to_subscribe.is_empty() || !s.to_snapshot.is_empty() {
+                        let gone: HashSet<&Symbol> = removed.iter().collect();
+                        s.to_subscribe.retain(|x| !gone.contains(x));
+                        s.to_snapshot.retain(|x| !gone.contains(x));
+                    }
                     let del: Vec<Symbol> = removed.iter().filter(|x| s.subscribed.remove(*x)).cloned().collect();
                     if let (Some(sid), false) = (s.sid, del.is_empty()) {
                         let text = self.ex.delete_markets(self.next_id, sid, &del);
@@ -339,6 +343,8 @@ impl Engine {
                 s.next_seq = None;
                 s.subscribed.clear();
                 s.pending.clear();
+                s.to_snapshot.clear();
+                s.to_subscribe = self.symbols.iter().cloned().collect();
                 s.snapshots_since_connect = 0;
                 s.last_frame = Some(Instant::now());
                 s.mark_all_syncing();
@@ -347,12 +353,14 @@ impl Engine {
                 } else {
                     s.set_health(Health::Failed, "reconnected, resyncing");
                 }
-                self.subscribe_all(source);
+                self.pace();
             }
             SocketMsg::Disconnected { source, reason } => {
                 let s = &mut self.sources[source];
                 s.connected = false;
                 s.sid = None;
+                s.to_subscribe.clear();
+                s.to_snapshot.clear();
                 s.mark_all_syncing();
                 s.set_health(Health::Failed, &format!("disconnected: {reason}"));
             }
@@ -409,14 +417,9 @@ impl Engine {
                     s.next_seq = Some(seq + 1);
                 }
                 s.pending.retain(|_, p| !matches!(p, Pending::Subscribe));
-                // Anything that changed while the subscribe was in flight.
-                let missing: Vec<Symbol> = want.difference(&s.subscribed).cloned().collect();
+                // Symbols removed while the subscribe was in flight; added
+                // ones are already queued for the pacer.
                 let extra: Vec<Symbol> = s.subscribed.difference(&want).cloned().collect();
-                if !missing.is_empty() {
-                    let text = self.ex.add_markets(self.next_id, sid, &missing);
-                    self.send(source, Pending::Add, text);
-                    self.sources[source].subscribed.extend(missing);
-                }
                 if !extra.is_empty() {
                     let text = self.ex.delete_markets(self.next_id, sid, &extra);
                     self.send(source, Pending::Delete, text);
@@ -476,10 +479,7 @@ impl Engine {
                         tracing::warn!(shard = self.id, source, %symbol, error = %e, "resyncing one book");
                         book.mark_syncing();
                         s.syncing += 1;
-                        if let Some(sid) = s.sid {
-                            let text = self.ex.get_snapshot(self.next_id, sid, std::slice::from_ref(&symbol));
-                            self.send(source, Pending::GetSnapshot, text);
-                        }
+                        s.to_snapshot.push_back(symbol.clone());
                     }
                 }
             }
@@ -514,14 +514,51 @@ impl Engine {
         let s = &mut self.sources[source];
         s.mark_all_syncing();
         s.set_health(Health::Failed, reason);
-        match s.sid {
-            Some(sid) if !s.subscribed.is_empty() => {
-                let all: Vec<Symbol> = s.subscribed.iter().cloned().collect();
-                let text = self.ex.get_snapshot(self.next_id, sid, &all);
-                self.send(source, Pending::GetSnapshot, text);
+        if s.sid.is_some() {
+            // Only books the server knows about can be re-snapshotted.
+            s.to_snapshot = s.subscribed.iter().cloned().collect();
+        } else {
+            let _ = s.cmds.send(SocketCmd::Reconnect);
+        }
+    }
+
+    /// Send at most one chunk per source per tick: a `subscribe` when the
+    /// source has no subscription yet, `add_markets` for queued symbols, or
+    /// `get_snapshot` for books waiting to be resynced.
+    fn pace(&mut self) {
+        let chunk = self.cfg.subscribe_chunk.max(1);
+        for i in 0..self.sources.len() {
+            let s = &self.sources[i];
+            if !s.connected {
+                continue;
             }
-            _ => {
-                let _ = s.cmds.send(SocketCmd::Reconnect);
+            match s.sid {
+                None => {
+                    if s.to_subscribe.is_empty()
+                        || s.pending.values().any(|p| matches!(p, Pending::Subscribe))
+                    {
+                        continue;
+                    }
+                    let s = &mut self.sources[i];
+                    let batch: Vec<Symbol> = s.to_subscribe.drain(..chunk.min(s.to_subscribe.len())).collect();
+                    s.subscribed.extend(batch.iter().cloned());
+                    let text = self.ex.subscribe_books(self.next_id, &batch);
+                    self.send(i, Pending::Subscribe, text);
+                }
+                Some(sid) => {
+                    if !s.to_subscribe.is_empty() {
+                        let s = &mut self.sources[i];
+                        let batch: Vec<Symbol> = s.to_subscribe.drain(..chunk.min(s.to_subscribe.len())).collect();
+                        s.subscribed.extend(batch.iter().cloned());
+                        let text = self.ex.add_markets(self.next_id, sid, &batch);
+                        self.send(i, Pending::Add, text);
+                    } else if !s.to_snapshot.is_empty() {
+                        let s = &mut self.sources[i];
+                        let batch: Vec<Symbol> = s.to_snapshot.drain(..chunk.min(s.to_snapshot.len())).collect();
+                        let text = self.ex.get_snapshot(self.next_id, sid, &batch);
+                        self.send(i, Pending::GetSnapshot, text);
+                    }
+                }
             }
         }
     }
