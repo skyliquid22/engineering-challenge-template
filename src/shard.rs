@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::book::{ApplyError, Book, level_update};
 use crate::exchange::kalshi::Kalshi;
 use crate::exchange::{Decoded, Event, Symbol};
+use crate::journal::{JournalLine, JournalSender};
 use crate::metrics::Metrics;
 use crate::socket::{SocketCmd, SocketConfig, SocketMsg, run_socket};
 use crate::writer::{Out, OutSender};
@@ -60,6 +61,8 @@ pub struct Engine {
     syncing: usize,
     pending: HashMap<u64, Pending>,
     out: OutSender,
+    journal: Option<JournalSender>,
+    label: String,
     metrics: Arc<Metrics>,
     next_id: u64,
     reported_live: i64,
@@ -71,16 +74,18 @@ pub fn spawn_shard(
     ex: Arc<Kalshi>,
     cfg: ShardConfig,
     out: OutSender,
+    journal: Option<JournalSender>,
     metrics: Arc<Metrics>,
     cancel: CancellationToken,
 ) -> (ShardHandle, tokio::task::JoinHandle<()>) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (sock_tx, sock_rx) = mpsc::unbounded_channel();
     let (socket_cmd_tx, socket_cmd_rx) = mpsc::unbounded_channel();
+    let label = format!("shard{id}");
     tokio::spawn(run_socket(
         ex.clone(),
         0,
-        format!("shard{id}"),
+        label.clone(),
         socket_cmd_rx,
         sock_tx,
         cancel.child_token(),
@@ -101,6 +106,8 @@ pub fn spawn_shard(
         syncing: 0,
         pending: HashMap::new(),
         out,
+        journal,
+        label,
         metrics,
         next_id: 1,
         reported_live: 0,
@@ -262,13 +269,19 @@ impl Engine {
                 self.mark_all_syncing();
                 tracing::info!(shard = self.id, %reason, "disconnected; books syncing until resubscribed");
             }
-            SocketMsg::Frame { received_at, text, .. } => match self.ex.decode(&text) {
-                Ok(d) => self.on_event(received_at, d),
-                Err(e) => {
-                    self.metrics.decode_errors.inc();
-                    tracing::warn!(shard = self.id, error = %e, frame = %text.chars().take(300).collect::<String>(), "undecodable frame");
+            SocketMsg::Frame { received_at, text, .. } => {
+                if let Some(j) = &self.journal {
+                    self.metrics.journal_queue.inc();
+                    let _ = j.send(JournalLine { received_at, source: self.label.clone(), text: text.clone() });
                 }
-            },
+                match self.ex.decode(&text) {
+                    Ok(d) => self.on_event(received_at, d),
+                    Err(e) => {
+                        self.metrics.decode_errors.inc();
+                        tracing::warn!(shard = self.id, error = %e, frame = %text.chars().take(300).collect::<String>(), "undecodable frame");
+                    }
+                }
+            }
         }
     }
 

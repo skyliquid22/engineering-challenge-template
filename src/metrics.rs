@@ -59,11 +59,13 @@ pub struct Metrics {
     pub exchange_errors: Counter,
     pub msgs_written: Counter,
     pub bytes_written: Counter,
+    pub journal_lines: Counter,
     pub symbols: Gauge,
     pub books_live: Gauge,
     pub books_syncing: Gauge,
     pub sockets_connected: Gauge,
     pub writer_queue: Gauge,
+    pub journal_queue: Gauge,
     /// received_at - sending_ts_ms (exchange queue time to our read), micros.
     lat_send: Mutex<Vec<i64>>,
     /// received_at - ts_ms (exchange change time to our read), micros.
@@ -135,6 +137,7 @@ impl Metrics {
                 syncing = self.books_syncing.get(),
                 sockets = self.sockets_connected.get(),
                 wq = self.writer_queue.get(),
+                jq = self.journal_queue.get(),
                 lat_send_ms = %Percentiles::of(&ls),
                 lat_exch_ms = %Percentiles::of(&le),
                 "metrics"

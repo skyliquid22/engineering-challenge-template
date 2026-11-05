@@ -8,6 +8,7 @@ use clap::Parser as _;
 use engineering_challenge::auth::Auth;
 use engineering_challenge::config::Config;
 use engineering_challenge::exchange::kalshi::Kalshi;
+use engineering_challenge::journal::spawn_journal;
 use engineering_challenge::metrics::Metrics;
 use engineering_challenge::shard::spawn_shard;
 use engineering_challenge::universe::run_universe;
@@ -53,6 +54,13 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
 
     let (out_tx, out_rx) = mpsc::channel();
     let writer = spawn_writer(cfg.writer(), out_rx, metrics.clone());
+    let (journal_tx, journal) = match cfg.journal() {
+        Some(jcfg) => {
+            let (tx, rx) = mpsc::channel();
+            (Some(tx), Some(spawn_journal(jcfg, rx, metrics.clone())))
+        }
+        None => (None, None),
+    };
 
     tokio::spawn(
         metrics
@@ -64,10 +72,19 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let spawner = {
         let ex = ex.clone();
         let out_tx = out_tx.clone();
+        let journal_tx = journal_tx.clone();
         let metrics = metrics.clone();
         let cancel = cancel.clone();
         move |id: usize| {
-            spawn_shard(id, ex.clone(), shard_cfg.clone(), out_tx.clone(), metrics.clone(), cancel.child_token())
+            spawn_shard(
+                id,
+                ex.clone(),
+                shard_cfg.clone(),
+                out_tx.clone(),
+                journal_tx.clone(),
+                metrics.clone(),
+                cancel.child_token(),
+            )
         }
     };
     let universe = tokio::spawn(run_universe(ex.clone(), cfg.universe()?, spawner, metrics.clone(), cancel.clone()));
@@ -97,12 +114,20 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     if tokio::time::timeout(Duration::from_secs(10), join_all).await.is_err() {
         tracing::warn!("shards did not stop within 10s");
     }
-    // Our own copy must go so the writer sees the channel close.
+    // Our own copies must go so the writer and journal see their channels close.
     drop(out_tx);
+    drop(journal_tx);
 
     tokio::task::spawn_blocking(move || writer.join())
         .await?
         .map_err(|_| anyhow::anyhow!("writer thread panicked"))??;
+    if let Some(j) = journal
+        && let Err(e) = tokio::task::spawn_blocking(move || j.join())
+            .await?
+            .map_err(|_| anyhow::anyhow!("journal thread panicked"))?
+    {
+        tracing::error!(error = %e, "journal failed");
+    }
     tracing::info!(
         written = metrics.msgs_written.get(),
         bytes = metrics.bytes_written.get(),

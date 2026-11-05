@@ -3,13 +3,20 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use crate::exchange::kalshi::{DEFAULT_REST_URL, DEFAULT_WS_URL};
+use crate::journal::JournalConfig;
 use crate::shard::ShardConfig;
 use crate::socket::SocketConfig;
 use crate::universe::UniverseConfig;
 use crate::writer::{Sink, WriterConfig};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum JournalArg {
+    Off,
+    On,
+}
 
 /// Collects every live Kalshi order book into aligned SBE files.
 #[derive(Parser, Debug, Clone)]
@@ -35,6 +42,16 @@ pub struct Config {
     /// File name prefix inside --out.
     #[arg(long, default_value = "kalshi-orderbook")]
     pub prefix: String,
+
+    /// Raw frame journal: every frame with its receive timestamp, one JSON
+    /// line each. Bounds crash loss to about a second, since the SBE writer
+    /// holds a whole 64 MiB chunk in memory.
+    #[arg(long, value_enum, default_value_t = JournalArg::On)]
+    pub journal: JournalArg,
+
+    /// Journal directory (default: <out>/journal).
+    #[arg(long)]
+    pub journal_dir: Option<PathBuf>,
 
     /// Markets per subscription (= per socket). Kalshi accepted all 176k open
     /// markets on one subscription in the probe, so this is a throughput
@@ -107,6 +124,23 @@ impl Config {
             reconcile_every: Duration::from_secs(self.reconcile_every_secs.max(30)),
             fixed_symbols,
             socket: self.socket(),
+        })
+    }
+
+    pub fn journal(&self) -> Option<JournalConfig> {
+        if self.journal == JournalArg::Off {
+            return None;
+        }
+        let dir = self.journal_dir.clone().unwrap_or_else(|| {
+            if self.out.as_os_str() == "-" {
+                PathBuf::from("journal")
+            } else {
+                self.out.join("journal")
+            }
+        });
+        Some(JournalConfig {
+            dir,
+            prefix: self.prefix.clone(),
         })
     }
 

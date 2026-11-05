@@ -8,6 +8,7 @@ pub mod book;
 pub mod config;
 pub mod exchange;
 pub mod fixed;
+pub mod journal;
 pub mod metrics;
 pub mod shard;
 pub mod socket;
