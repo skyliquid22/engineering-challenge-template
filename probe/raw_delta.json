@@ -1,0 +1,1 @@
+{"type":"orderbook_delta","sid":1,"seq":1025,"msg":{"market_ticker":"KX1ALBUM-26DEC-ICE","market_id":"973f6cad-a186-4416-857b-1cb34426eb30","clock":115121235239,"price_dollars":"0.3200","delta_fp":"100.00","side":"no","ts":"2026-11-04T22:20:37.097Z","ts_ms":1793830837097},"sending_ts_ms":1793830837115}

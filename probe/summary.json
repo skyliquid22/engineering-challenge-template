@@ -1,0 +1,34 @@
+{
+  "active_markets": 126,
+  "bytes": 14870249,
+  "deltas": 852,
+  "discovery_secs": 77.126488583,
+  "errors": [
+    "error 25: Subscription buffer overflow"
+  ],
+  "frames": 28922,
+  "frames_per_sec_avg": 482.01065907795316,
+  "frames_per_sec_peak": 1982,
+  "latency_recv_minus_delta_ts": {
+    "max_ms": 37391.677,
+    "n": 852,
+    "p50_ms": 19368.52,
+    "p90_ms": 35760.029,
+    "p99_ms": 37389.748
+  },
+  "latency_recv_minus_sending_ts": {
+    "max_ms": 38264.577,
+    "n": 28922,
+    "p50_ms": 16097.443,
+    "p90_ms": 33924.265,
+    "p99_ms": 37385.621
+  },
+  "markets_open": 176165,
+  "markets_per_subscription": 176165,
+  "measure_secs": 60.002822459,
+  "seq_gaps": 0,
+  "snapshots": 28067,
+  "snapshots_complete_after_secs": null,
+  "steady_frames_per_sec_avg": 741.5897435897435,
+  "steady_frames_per_sec_peak": 1982
+}

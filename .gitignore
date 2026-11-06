@@ -2,3 +2,5 @@
 /out/
 *.sbe
 *.jsonl
+/probe/symbols.txt
+__pycache__/

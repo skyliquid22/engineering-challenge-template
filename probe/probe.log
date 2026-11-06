@@ -1,0 +1,16 @@
+auth: key 1555effe-4d8a-4f85-a4e2-5f3273e2c691 (ed25519)
+discovery: 176165 open non-MVE markets in 77.1s
+limit search: trying 176165 markets on one subscription
+limit search: all 176165 accepted on one subscription
+markets per subscription: 176165
+measure: 60s on 176165 markets
+  frames 28922 (482/s avg, peak 1982/s incl. snapshot burst)
+  steady state after snapshots: avg 741.6/s, peak 1982/s
+  bytes 14870249 (242.0 KiB/s)
+  snapshots 28067 (all 176165 received after Nones), deltas 852, active markets 126
+  seq gaps 0
+  latency recv - sending_ts_ms: n=28922 p50=16097.4 p90=33924.3 p99=37385.6 max=38264.6
+  latency recv - delta ts_ms:   n=852 p50=19368.5 p90=35760.0 p99=37389.7 max=37391.7
+  errors (1): ["error 25: Subscription buffer overflow"]
+wrote probe/summary.json
+probe exit 0

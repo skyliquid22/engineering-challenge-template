@@ -1,0 +1,50 @@
+{
+  "note": "Trimmed market objects captured from the Kalshi REST API to verify that mve_collection_ticker is set on multivariate (MVE) markets and absent on regular ones. Only the fields relevant to that check are kept; key counts are of the full objects.",
+  "requests": {
+    "https://external-api.kalshi.com/trade-api/v2/markets?mve_filter=only&limit=3": {
+      "captured_at_utc": "2026-11-05T00:56:55Z",
+      "markets": [
+        {
+          "ticker": "KXMVECROSSCATEGORY-S2026KPGCHS63JBXOJMSB-IC67NBSU5",
+          "status": "active",
+          "mve_collection_ticker": "KXMVECROSSCATEGORY-R",
+          "has_mve_selected_legs": true,
+          "field_count": 43
+        },
+        {
+          "ticker": "KXMVECROSSCATEGORY-S2026LBKB3R2IA3V6IYJV-YOHPWYU2F",
+          "status": "active",
+          "mve_collection_ticker": "KXMVECROSSCATEGORY-R",
+          "has_mve_selected_legs": true,
+          "field_count": 43
+        },
+        {
+          "ticker": "KXMVECROSSCATEGORY-S2026NHON4FYJXQWNPLWS-DAQBLF3UL",
+          "status": "active",
+          "mve_collection_ticker": "KXMVECROSSCATEGORY-R",
+          "has_mve_selected_legs": true,
+          "field_count": 43
+        }
+      ]
+    },
+    "https://external-api.kalshi.com/trade-api/v2/markets?status=open&mve_filter=exclude&limit=2": {
+      "captured_at_utc": "2026-11-05T00:56:55Z",
+      "markets": [
+        {
+          "ticker": "KXNBAPTS-26NOV04CHINYK-NYKJBRUNSON11-40",
+          "status": "active",
+          "mve_collection_ticker": null,
+          "has_mve_selected_legs": false,
+          "field_count": 44
+        },
+        {
+          "ticker": "KXNHL1PSPREAD-26NOV04CHIFLA-FLA3",
+          "status": "active",
+          "mve_collection_ticker": null,
+          "has_mve_selected_legs": false,
+          "field_count": 43
+        }
+      ]
+    }
+  }
+}
