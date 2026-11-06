@@ -26,8 +26,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::book::{ApplyError, Book, level_update};
-use crate::exchange::kalshi::Kalshi;
-use crate::exchange::{Decoded, Event, Symbol};
+use crate::exchange::{Decoded, Event, Exchange, Symbol};
 use crate::journal::{JournalLine, JournalSender};
 use crate::metrics::{Metrics, RateReport};
 use crate::socket::{SocketCmd, SocketConfig, SocketMsg, run_socket};
@@ -184,9 +183,9 @@ impl Source {
     }
 }
 
-pub struct Engine {
+pub struct Engine<E: Exchange> {
     id: usize,
-    ex: Arc<Kalshi>,
+    ex: Arc<E>,
     cfg: ShardConfig,
     sources: Vec<Source>,
     active: usize,
@@ -203,9 +202,9 @@ pub struct Engine {
     ticks: u64,
 }
 
-pub fn spawn_shard(
+pub fn spawn_shard<E: Exchange>(
     id: usize,
-    ex: Arc<Kalshi>,
+    ex: Arc<E>,
     cfg: ShardConfig,
     out: OutSender,
     journal: Option<JournalSender>,
@@ -289,7 +288,7 @@ fn next_boundary(every: Duration) -> tokio::time::Instant {
     tokio::time::Instant::now() + Duration::from_millis((period_ms - into) as u64)
 }
 
-impl Engine {
+impl<E: Exchange> Engine<E> {
     async fn run(
         mut self,
         mut cmds: mpsc::UnboundedReceiver<ShardCmd>,

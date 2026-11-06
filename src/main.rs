@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use clap::Parser as _;
 use engineering_challenge::auth::Auth;
-use engineering_challenge::config::Config;
+use engineering_challenge::config::{Config, ExchangeKind};
+use engineering_challenge::exchange::Exchange;
 use engineering_challenge::exchange::kalshi::Kalshi;
 use engineering_challenge::journal::spawn_journal;
 use engineering_challenge::metrics::Metrics;
@@ -34,7 +35,18 @@ fn main() -> anyhow::Result<()> {
 async fn run(cfg: Config) -> anyhow::Result<()> {
     let auth = Arc::new(Auth::load(&cfg.key_id, &cfg.private_key)?);
     tracing::info!(key = auth.key_id(), algorithm = auth.algorithm(), "authenticating");
-    let ex = Arc::new(Kalshi::new(auth, &cfg.ws_url, &cfg.rest_url));
+    match cfg.exchange {
+        ExchangeKind::Kalshi => {
+            let ex = Arc::new(Kalshi::new(auth, &cfg.ws_url, &cfg.rest_url));
+            collect(cfg, ex).await
+        }
+        ExchangeKind::Polymarket => {
+            anyhow::bail!("polymarket adapter is a stub (see src/exchange/polymarket.rs)")
+        }
+    }
+}
+
+async fn collect<E: Exchange>(cfg: Config, ex: Arc<E>) -> anyhow::Result<()> {
     let metrics = Metrics::new();
     let cancel = CancellationToken::new();
 

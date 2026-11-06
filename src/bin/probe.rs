@@ -12,7 +12,7 @@ use chrono::Utc;
 use clap::Parser;
 use engineering_challenge::auth::Auth;
 use engineering_challenge::exchange::kalshi::{DEFAULT_REST_URL, DEFAULT_WS_URL, Kalshi};
-use engineering_challenge::exchange::Event;
+use engineering_challenge::exchange::{Event, Exchange};
 use engineering_challenge::metrics::Percentiles;
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio_tungstenite::tungstenite::Message;

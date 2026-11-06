@@ -12,8 +12,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::exchange::kalshi::Kalshi;
-use crate::exchange::{Event, LifecycleKind, Symbol};
+use crate::exchange::{Event, Exchange, LifecycleKind, Symbol};
 use crate::metrics::Metrics;
 use crate::shard::{ShardCmd, ShardHandle};
 use crate::socket::{SocketCmd, SocketConfig, SocketMsg, run_socket};
@@ -92,7 +91,7 @@ impl<F: FnMut(usize) -> (ShardHandle, tokio::task::JoinHandle<()>)> Allocator<F>
     }
 }
 
-async fn discover_with_retry(ex: &Kalshi, cancel: &CancellationToken, attempts: usize) -> anyhow::Result<Vec<Symbol>> {
+async fn discover_with_retry<E: Exchange>(ex: &E, cancel: &CancellationToken, attempts: usize) -> anyhow::Result<Vec<Symbol>> {
     let mut delay = Duration::from_secs(1);
     let mut last = None;
     for _ in 0..attempts {
@@ -113,8 +112,8 @@ async fn discover_with_retry(ex: &Kalshi, cancel: &CancellationToken, attempts: 
 }
 
 /// Runs until cancelled. Returns the shard tasks so the caller can join them.
-pub async fn run_universe(
-    ex: Arc<Kalshi>,
+pub async fn run_universe<E: Exchange>(
+    ex: Arc<E>,
     cfg: UniverseConfig,
     spawn_shard: impl FnMut(usize) -> (ShardHandle, tokio::task::JoinHandle<()>),
     metrics: Arc<Metrics>,
@@ -222,8 +221,8 @@ pub async fn run_universe(
     Ok(alloc.tasks)
 }
 
-fn handle_lifecycle(
-    ex: &Kalshi,
+fn handle_lifecycle<E: Exchange>(
+    ex: &E,
     cmds: &mpsc::UnboundedSender<SocketCmd>,
     next_id: &mut u64,
     msg: SocketMsg,

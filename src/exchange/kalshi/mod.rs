@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use super::{Decoded, Symbol, WsStream};
+use super::{Decoded, Exchange, Symbol, WsStream};
 use crate::auth::Auth;
 
 pub const DEFAULT_WS_URL: &str = "wss://external-api-ws.kalshi.com/trade-api/ws/v2";
@@ -48,16 +48,20 @@ impl Kalshi {
     }
 }
 
-impl Kalshi {
-    pub async fn discover(&self) -> anyhow::Result<Vec<Symbol>> {
+impl Exchange for Kalshi {
+    fn name(&self) -> &'static str {
+        "kalshi"
+    }
+
+    async fn discover(&self) -> anyhow::Result<Vec<Symbol>> {
         rest::discover(self).await
     }
 
-    pub async fn connect(&self) -> anyhow::Result<WsStream> {
+    async fn connect(&self) -> anyhow::Result<WsStream> {
         ws::connect(self).await
     }
 
-    pub fn subscribe_books(&self, id: u64, symbols: &[Symbol]) -> String {
+    fn subscribe_books(&self, id: u64, symbols: &[Symbol]) -> String {
         json!({
             "id": id,
             "cmd": "subscribe",
@@ -66,19 +70,19 @@ impl Kalshi {
         .to_string()
     }
 
-    pub fn add_markets(&self, id: u64, sid: u64, symbols: &[Symbol]) -> String {
+    fn add_markets(&self, id: u64, sid: u64, symbols: &[Symbol]) -> String {
         self.update_subscription(id, sid, "add_markets", symbols)
     }
 
-    pub fn delete_markets(&self, id: u64, sid: u64, symbols: &[Symbol]) -> String {
+    fn delete_markets(&self, id: u64, sid: u64, symbols: &[Symbol]) -> String {
         self.update_subscription(id, sid, "delete_markets", symbols)
     }
 
-    pub fn get_snapshot(&self, id: u64, sid: u64, symbols: &[Symbol]) -> String {
+    fn get_snapshot(&self, id: u64, sid: u64, symbols: &[Symbol]) -> String {
         self.update_subscription(id, sid, "get_snapshot", symbols)
     }
 
-    pub fn subscribe_lifecycle(&self, id: u64) -> String {
+    fn subscribe_lifecycle(&self, id: u64) -> String {
         json!({
             "id": id,
             "cmd": "subscribe",
@@ -87,7 +91,7 @@ impl Kalshi {
         .to_string()
     }
 
-    pub fn decode(&self, text: &str) -> anyhow::Result<Decoded> {
+    fn decode(&self, text: &str) -> anyhow::Result<Decoded> {
         decode::decode(text)
     }
 }

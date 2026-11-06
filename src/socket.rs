@@ -17,7 +17,7 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
-use crate::exchange::kalshi::Kalshi;
+use crate::exchange::Exchange;
 use crate::metrics::Metrics;
 
 #[derive(Debug)]
@@ -80,8 +80,8 @@ fn jitter(d: Duration) -> Duration {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn run_socket(
-    ex: Arc<Kalshi>,
+pub async fn run_socket<E: Exchange>(
+    ex: Arc<E>,
     source: usize,
     label: String,
     mut cmds: mpsc::UnboundedReceiver<SocketCmd>,

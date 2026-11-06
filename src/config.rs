@@ -13,6 +13,12 @@ use crate::universe::UniverseConfig;
 use crate::writer::{Sink, WriterConfig};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ExchangeKind {
+    Kalshi,
+    Polymarket,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum JournalArg {
     Off,
     Active,
@@ -23,6 +29,9 @@ pub enum JournalArg {
 #[derive(Parser, Debug, Clone)]
 #[command(name = "collector", version, about)]
 pub struct Config {
+    #[arg(long, value_enum, default_value_t = ExchangeKind::Kalshi)]
+    pub exchange: ExchangeKind,
+
     #[arg(long, env = "KALSHI_KEY_ID")]
     pub key_id: String,
 
