@@ -131,6 +131,11 @@ pub struct Config {
     /// initial sync before subscribing itself.
     #[arg(long, default_value_t = 600)]
     pub standby_defer_secs: u64,
+
+    /// Test hook: shard 0 force-reconnects one of its sockets this often
+    /// (alternating), to exercise failover. 0 disables.
+    #[arg(long, default_value_t = 0)]
+    pub chaos_reconnect_secs: u64,
 }
 
 impl Config {
@@ -160,6 +165,8 @@ impl Config {
             pace: Duration::from_millis(self.pace_ms),
             stagger: Duration::from_millis(self.shard_stagger_ms),
             standby_defer: Duration::from_secs(self.standby_defer_secs),
+            chaos_reconnect: (self.chaos_reconnect_secs > 0)
+                .then(|| Duration::from_secs(self.chaos_reconnect_secs)),
         }
     }
 

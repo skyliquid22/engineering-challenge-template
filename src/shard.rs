@@ -67,6 +67,9 @@ pub struct ShardConfig {
     /// most this long) before subscribing, so startup bandwidth goes to the
     /// books being written.
     pub standby_defer: Duration,
+    /// Test hook: shard 0 forces one of its sockets to reconnect this often,
+    /// to demonstrate failover and the snapshot-on-switch in the output.
+    pub chaos_reconnect: Option<Duration>,
 }
 
 pub struct ShardHandle {
@@ -200,6 +203,8 @@ pub struct Engine<E: Exchange> {
     stale_candidates: HashMap<Symbol, u64>,
     rates: HashMap<Symbol, Rate>,
     ticks: u64,
+    last_chaos: Instant,
+    chaos_turn: usize,
 }
 
 pub fn spawn_shard<E: Exchange>(
@@ -275,6 +280,8 @@ pub fn spawn_shard<E: Exchange>(
         stale_candidates: HashMap::new(),
         rates: HashMap::new(),
         ticks: 0,
+        last_chaos: Instant::now(),
+        chaos_turn: 0,
     };
     let task = tokio::spawn(engine.run(cmd_rx, sock_rx, cancel));
     (ShardHandle { id, cmds: cmd_tx }, task)
@@ -865,6 +872,16 @@ impl<E: Exchange> Engine<E> {
         self.ticks += 1;
         if self.ticks.is_multiple_of(10) {
             self.report_rates();
+        }
+        if let Some(every) = self.cfg.chaos_reconnect
+            && self.id == 0
+            && now.duration_since(self.last_chaos) >= every
+        {
+            self.last_chaos = now;
+            let victim = self.chaos_turn % self.sources.len();
+            self.chaos_turn += 1;
+            tracing::warn!(shard = self.id, source = victim, active = self.active, "chaos: forcing reconnect");
+            let _ = self.sources[victim].cmds.send(SocketCmd::Reconnect);
         }
         for s in &mut self.sources {
             s.update_health();
