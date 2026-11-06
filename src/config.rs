@@ -45,8 +45,10 @@ pub struct Config {
     #[arg(long, env = "KALSHI_REST_URL", default_value = DEFAULT_REST_URL)]
     pub rest_url: String,
 
-    /// Output directory for hourly SBE files, or `-` for stdout.
-    #[arg(long, default_value = "out")]
+    /// `-` (the default) writes the SBE stream to stdout; a directory path
+    /// writes hourly files `<dir>/<prefix>-<YYYYMMDD>T<HH>Z.sbe` instead.
+    /// SIGINT drains and flushes the same way in both modes.
+    #[arg(long, default_value = "-")]
     pub out: PathBuf,
 
     /// File name prefix inside --out.
@@ -59,7 +61,8 @@ pub struct Config {
     #[arg(long, value_enum, default_value_t = JournalArg::Active)]
     pub journal: JournalArg,
 
-    /// Journal directory (default: <out>/journal).
+    /// Journal directory (default: `journal/` next to the process when
+    /// writing to stdout, `<out>/journal` when writing files).
     #[arg(long)]
     pub journal_dir: Option<PathBuf>,
 
