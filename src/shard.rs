@@ -70,6 +70,9 @@ pub struct ShardConfig {
     /// Test hook: shard 0 forces one of its sockets to reconnect this often,
     /// to demonstrate failover and the snapshot-on-switch in the output.
     pub chaos_reconnect: Option<Duration>,
+    /// Subscribed with a non-zero `update_interval_ms`: clocks are conflated
+    /// per connection and the per-market stale check must stay off.
+    pub conflated: bool,
 }
 
 pub struct ShardHandle {
@@ -748,7 +751,8 @@ impl<E: Exchange> Engine<E> {
     /// the whole source is lagging (buffered or throttled) and we fail over.
     fn check_stale_books(&mut self) {
         let a = self.active;
-        if self.sources.len() < 2
+        if self.cfg.conflated
+            || self.sources.len() < 2
             || !self.sources[a].connected
             || self.sources[a].health != Health::Healthy
         {

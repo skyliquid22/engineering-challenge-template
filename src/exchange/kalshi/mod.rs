@@ -22,6 +22,8 @@ pub struct Kalshi {
     ws_url: String,
     rest_url: String,
     http: reqwest::Client,
+    /// `update_interval_ms` for the orderbook subscription; 0 = real time.
+    update_interval_ms: u64,
 }
 
 impl Kalshi {
@@ -35,7 +37,15 @@ impl Kalshi {
                 .timeout(std::time::Duration::from_secs(90))
                 .build()
                 .expect("reqwest client"),
+            update_interval_ms: 0,
         }
+    }
+
+    /// 0 (default) is one delta per change; 100 or 1000 asks Kalshi to
+    /// conflate each window into one delta per changed level.
+    pub fn with_update_interval_ms(mut self, ms: u64) -> Self {
+        self.update_interval_ms = ms;
+        self
     }
 
     fn update_subscription(&self, id: u64, sid: u64, action: &str, symbols: &[Symbol]) -> String {
@@ -62,12 +72,11 @@ impl Exchange for Kalshi {
     }
 
     fn subscribe_books(&self, id: u64, symbols: &[Symbol]) -> String {
-        json!({
-            "id": id,
-            "cmd": "subscribe",
-            "params": { "channels": [ORDERBOOK_CHANNEL], "market_tickers": symbols }
-        })
-        .to_string()
+        let mut params = json!({ "channels": [ORDERBOOK_CHANNEL], "market_tickers": symbols });
+        if self.update_interval_ms != 0 {
+            params["update_interval_ms"] = json!(self.update_interval_ms);
+        }
+        json!({ "id": id, "cmd": "subscribe", "params": params }).to_string()
     }
 
     fn add_markets(&self, id: u64, sid: u64, symbols: &[Symbol]) -> String {

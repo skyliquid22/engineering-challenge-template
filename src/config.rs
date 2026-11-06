@@ -136,6 +136,23 @@ pub struct Config {
     /// (alternating), to exercise failover. 0 disables.
     #[arg(long, default_value_t = 0)]
     pub chaos_reconnect_secs: u64,
+
+    /// Kalshi `update_interval_ms` on the orderbook subscription: 0 is one
+    /// delta per change; 100 or 1000 conflates each window into one delta
+    /// per changed level. Conflated clocks are not comparable across
+    /// connections, so the per-market stale check is off when this is not 0.
+    #[arg(long, default_value_t = 0)]
+    pub update_interval_ms: u64,
+}
+
+impl Config {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(self.update_interval_ms, 0 | 100 | 1000),
+            "--update-interval-ms must be 0, 100 or 1000"
+        );
+        Ok(())
+    }
 }
 
 impl Config {
@@ -167,6 +184,7 @@ impl Config {
             standby_defer: Duration::from_secs(self.standby_defer_secs),
             chaos_reconnect: (self.chaos_reconnect_secs > 0)
                 .then(|| Duration::from_secs(self.chaos_reconnect_secs)),
+            conflated: self.update_interval_ms != 0,
         }
     }
 

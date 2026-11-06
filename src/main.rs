@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cfg = Config::parse();
+    cfg.validate()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("collector")
@@ -37,7 +38,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     tracing::info!(key = auth.key_id(), algorithm = auth.algorithm(), "authenticating");
     match cfg.exchange {
         ExchangeKind::Kalshi => {
-            let ex = Arc::new(Kalshi::new(auth, &cfg.ws_url, &cfg.rest_url));
+            let ex = Arc::new(
+                Kalshi::new(auth, &cfg.ws_url, &cfg.rest_url)
+                    .with_update_interval_ms(cfg.update_interval_ms),
+            );
             collect(cfg, ex).await
         }
         ExchangeKind::Polymarket => {

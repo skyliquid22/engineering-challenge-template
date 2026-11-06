@@ -140,6 +140,10 @@ impl Metrics {
         tick.tick().await;
         let mut prev = self.counters();
         let mut rising_for = 0u32;
+        // Rolling 60 s window of send-latency samples, so a run summary can
+        // quote one number per run instead of a chain of 10 s intervals.
+        let window_len = ((60.0 / every.as_secs_f64()).ceil() as usize).max(1);
+        let mut recent: std::collections::VecDeque<Vec<i64>> = std::collections::VecDeque::new();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -151,6 +155,13 @@ impl Metrics {
             let (mut ls, mut le) = self.take_latencies();
             ls.sort_unstable();
             le.sort_unstable();
+            recent.push_back(ls.clone());
+            while recent.len() > window_len {
+                recent.pop_front();
+            }
+            let mut win: Vec<i64> = recent.iter().flatten().copied().collect();
+            win.sort_unstable();
+            let w = Percentiles::of(&win);
             // Inbound latency that keeps growing means the link cannot carry
             // the subscribed stream. Nothing in this process fixes that, so
             // say so plainly instead of letting the queue grow quietly.
@@ -169,6 +180,7 @@ impl Metrics {
                 rising_for = 0;
             }
             let rates = self.merged_rates();
+            let rss = rss_mib().map_or_else(|| "n/a".to_owned(), |m| format!("{m:.1}"));
             let top5 = rates
                 .top
                 .iter()
@@ -206,6 +218,11 @@ impl Metrics {
                 rate_1to10 = rates.buckets[2],
                 rate_gt10 = rates.buckets[3],
                 top5 = %top5,
+                rss_mib = %rss,
+                lat60_n = w.n,
+                lat60_p50_ms = format_args!("{:.1}", w.p50 as f64 / 1000.0),
+                lat60_p90_ms = format_args!("{:.1}", w.p90 as f64 / 1000.0),
+                lat60_p99_ms = format_args!("{:.1}", w.p99 as f64 / 1000.0),
                 "metrics"
             );
             prev = cur;
@@ -231,6 +248,24 @@ impl Metrics {
             self.bytes_written.get(),
             self.stale_books.get(),
         ]
+    }
+}
+
+/// Resident set size in MiB. Linux reads `VmRSS` from `/proc/self/status`
+/// (the same figure as `/proc/self/statm` resident pages times the page size,
+/// without assuming a page size). Elsewhere there is no portable source
+/// without another dependency, so the metrics line says `n/a`.
+pub fn rss_mib() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+        let kib: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        return Some(kib / 1024.0);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
     }
 }
 
