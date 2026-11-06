@@ -54,7 +54,8 @@ pub struct ShardConfig {
     pub socket: SocketConfig,
     pub snapshot_every: Duration,
     pub journal: JournalMode,
-    /// Tickers per subscribe / add_markets / get_snapshot command.
+    /// Largest subscribe / add_markets / get_snapshot request; each source
+    /// adapts its own size to how fast the previous request arrived.
     pub subscribe_chunk: usize,
     /// Interval between chunks, per source.
     pub pace: Duration,
@@ -71,6 +72,13 @@ pub struct ShardHandle {
     pub id: usize,
     pub cmds: mpsc::UnboundedSender<ShardCmd>,
 }
+
+/// Smallest snapshot request; the chunk never adapts below this.
+const MIN_CHUNK: usize = 10;
+/// A chunk should arrive within this; slower halves the next one, twice as
+/// fast doubles it. Keeps roughly a second of snapshots in flight per socket
+/// whatever the link delivers.
+const CHUNK_TARGET: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Health {
@@ -104,6 +112,10 @@ struct Source {
     to_snapshot: VecDeque<Symbol>,
     /// Snapshots requested (subscribe/add/get_snapshot) but not yet received.
     outstanding: usize,
+    /// Current request size; adapts to how fast the previous one arrived.
+    chunk: usize,
+    /// Size of the previous request, 0 once its delivery time was used.
+    requested_prev: usize,
     last_request_at: Instant,
     last_snapshot_at: Instant,
     connected_at: Instant,
@@ -212,6 +224,8 @@ pub fn spawn_shard(
             to_subscribe: VecDeque::new(),
             to_snapshot: VecDeque::new(),
             outstanding: 0,
+            chunk: (cfg.subscribe_chunk / 4).clamp(MIN_CHUNK, cfg.subscribe_chunk.max(MIN_CHUNK)),
+            requested_prev: 0,
             last_request_at: Instant::now(),
             last_snapshot_at: Instant::now(),
             connected_at: Instant::now(),
@@ -374,6 +388,7 @@ impl Engine {
                 s.to_snapshot.clear();
                 s.to_subscribe = self.symbols.iter().cloned().collect();
                 s.outstanding = 0;
+                s.requested_prev = 0;
                 s.connected_at = Instant::now();
                 s.last_request_at = s.connected_at;
                 s.last_snapshot_at = s.connected_at;
@@ -561,7 +576,7 @@ impl Engine {
     /// `get_snapshot` for books waiting to be resynced.
     fn pace(&mut self) {
         const STALL: Duration = Duration::from_secs(10);
-        let chunk = self.cfg.subscribe_chunk.max(1);
+        let max_chunk = self.cfg.subscribe_chunk.max(MIN_CHUNK);
         let now = Instant::now();
         let active = self.active;
         let active_ready = self.sources[active].health == Health::Healthy;
@@ -581,7 +596,7 @@ impl Engine {
             // Flow control: about one chunk in flight per source. Whatever the
             // pipe delivers sets the pace, so exchange-side queues stay short
             // and deltas for live books are not stuck behind snapshots.
-            if s.outstanding > chunk / 4 {
+            if s.outstanding > s.chunk / 4 {
                 let stalled = now.duration_since(s.last_request_at) > STALL
                     && now.duration_since(s.last_snapshot_at) > STALL;
                 if !stalled {
@@ -593,6 +608,18 @@ impl Engine {
                 self.sources[i].outstanding = 0;
                 self.sources[i].update_health();
             }
+            // Adapt the request size to how fast the previous one arrived.
+            let s = &mut self.sources[i];
+            if s.requested_prev > 0 {
+                let took = now.duration_since(s.last_request_at);
+                if took > CHUNK_TARGET {
+                    s.chunk = (s.chunk / 2).max(MIN_CHUNK);
+                } else if took < CHUNK_TARGET / 2 {
+                    s.chunk = (s.chunk * 2).min(max_chunk);
+                }
+                s.requested_prev = 0;
+            }
+            let chunk = s.chunk;
             let s = &self.sources[i];
             match s.sid {
                 None => {
@@ -605,6 +632,7 @@ impl Engine {
                     let batch: Vec<Symbol> = s.to_subscribe.drain(..chunk.min(s.to_subscribe.len())).collect();
                     s.subscribed.extend(batch.iter().cloned());
                     s.outstanding += batch.len();
+                    s.requested_prev = batch.len();
                     s.last_request_at = now;
                     let text = self.ex.subscribe_books(self.next_id, &batch);
                     self.send(i, Pending::Subscribe, text);
@@ -615,6 +643,7 @@ impl Engine {
                         let batch: Vec<Symbol> = s.to_subscribe.drain(..chunk.min(s.to_subscribe.len())).collect();
                         s.subscribed.extend(batch.iter().cloned());
                         s.outstanding += batch.len();
+                        s.requested_prev = batch.len();
                         s.last_request_at = now;
                         let text = self.ex.add_markets(self.next_id, sid, &batch);
                         self.send(i, Pending::Add, text);
@@ -622,6 +651,7 @@ impl Engine {
                         let s = &mut self.sources[i];
                         let batch: Vec<Symbol> = s.to_snapshot.drain(..chunk.min(s.to_snapshot.len())).collect();
                         s.outstanding += batch.len();
+                        s.requested_prev = batch.len();
                         s.last_request_at = now;
                         let text = self.ex.get_snapshot(self.next_id, sid, &batch);
                         self.send(i, Pending::GetSnapshot, text);

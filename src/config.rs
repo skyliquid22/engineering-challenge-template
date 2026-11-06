@@ -95,11 +95,11 @@ pub struct Config {
     #[arg(long)]
     pub symbols_file: Option<PathBuf>,
 
-    /// Tickers per subscribe/add/get_snapshot request. Each socket keeps
-    /// about one request in flight; the probe showed one connection drains
-    /// ~2000 frames/s and a far larger snapshot burst overflows Kalshi's
-    /// buffer (error 25).
-    #[arg(long, default_value_t = 200)]
+    /// Largest subscribe/add/get_snapshot request, in tickers. Each socket
+    /// keeps about one request in flight and adapts its size to how fast the
+    /// previous one arrived (halving above 1 s, doubling below 0.5 s), so the
+    /// exchange-side queue stays near a second whatever the link delivers.
+    #[arg(long, default_value_t = 400)]
     pub subscribe_chunk: usize,
 
     #[arg(long, default_value_t = 250)]

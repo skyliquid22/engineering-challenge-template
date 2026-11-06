@@ -106,6 +106,7 @@ impl Metrics {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
         let mut prev = self.counters();
+        let mut rising_for = 0u32;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -117,6 +118,23 @@ impl Metrics {
             let (mut ls, mut le) = self.take_latencies();
             ls.sort_unstable();
             le.sort_unstable();
+            // Inbound latency that keeps growing means the link cannot carry
+            // the subscribed stream. Nothing in this process fixes that, so
+            // say so plainly instead of letting the queue grow quietly.
+            let p50_ms = Percentiles::of(&ls).p50 / 1000;
+            if !ls.is_empty() && p50_ms > 5_000 {
+                rising_for += 1;
+                if rising_for >= 3 {
+                    tracing::warn!(
+                        p50_s = p50_ms / 1000,
+                        kib_s = format_args!("{:.0}", rate(1) / 1024.0),
+                        "inbound latency above 5 s for {}s: the network link is not keeping up with the subscribed markets; expect exchange-side resets until bandwidth is added or the universe is split across hosts",
+                        rising_for as f64 * secs
+                    );
+                }
+            } else {
+                rising_for = 0;
+            }
             tracing::info!(
                 target: "metrics",
                 frames_s = format_args!("{:.0}", rate(0)),
