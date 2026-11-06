@@ -121,6 +121,8 @@ struct Source {
     last_request_at: Instant,
     last_snapshot_at: Instant,
     connected_at: Instant,
+    /// EWMA of `received_at - sending_ts` on this connection, micros.
+    lat_ewma_us: f64,
     syncing: usize,
     health: Health,
     unhealthy_since: Instant,
@@ -185,6 +187,8 @@ pub struct Engine {
     next_id: u64,
     reported_live: i64,
     reported_syncing: i64,
+    /// symbol -> active source's clock when it was first seen lagging the standby.
+    stale_candidates: HashMap<Symbol, u64>,
 }
 
 pub fn spawn_shard(
@@ -234,6 +238,7 @@ pub fn spawn_shard(
             last_request_at: Instant::now(),
             last_snapshot_at: Instant::now(),
             connected_at: Instant::now(),
+            lat_ewma_us: 0.0,
             syncing: 0,
             health: Health::Syncing,
             unhealthy_since: Instant::now(),
@@ -256,6 +261,7 @@ pub fn spawn_shard(
         next_id: 1,
         reported_live: 0,
         reported_syncing: 0,
+        stale_candidates: HashMap::new(),
     };
     let task = tokio::spawn(engine.run(cmd_rx, sock_rx, cancel));
     (ShardHandle { id, cmds: cmd_tx }, task)
@@ -394,6 +400,7 @@ impl Engine {
                 s.to_subscribe = self.symbols.iter().cloned().collect();
                 s.outstanding = 0;
                 s.requested_prev = 0;
+                s.lat_ewma_us = 0.0;
                 s.connected_at = Instant::now();
                 s.last_request_at = s.connected_at;
                 s.last_snapshot_at = s.connected_at;
@@ -504,6 +511,11 @@ impl Engine {
             }
             Event::Delta { symbol, side, price, delta, clock, exchange_ts } => {
                 self.metrics.deltas_rx.inc();
+                if let Some(st) = d.sending_ts {
+                    let lat = (received_at - st).num_microseconds().unwrap_or(0) as f64;
+                    let s = &mut self.sources[source];
+                    s.lat_ewma_us = if s.lat_ewma_us == 0.0 { lat } else { 0.9 * s.lat_ewma_us + 0.1 * lat };
+                }
                 if is_active {
                     if let Some(st) = d.sending_ts {
                         self.metrics.record_send_latency((received_at - st).num_microseconds().unwrap_or(0));
@@ -707,6 +719,78 @@ impl Engine {
         tracing::debug!(shard = self.id, n, "periodic snapshots");
     }
 
+    /// Extension 2, per symbol. Kalshi's `clock` is per market and identical
+    /// on every connection, so a live book whose clock is behind the healthy
+    /// standby's copy for two consecutive ticks missed an update on the active
+    /// source. A few such books get a `get_snapshot` each; many at once means
+    /// the whole source is lagging (buffered or throttled) and we fail over.
+    fn check_stale_books(&mut self) {
+        let a = self.active;
+        if self.sources.len() < 2
+            || !self.sources[a].connected
+            || self.sources[a].health != Health::Healthy
+        {
+            self.stale_candidates.clear();
+            return;
+        }
+        let Some(b) = (0..self.sources.len())
+            .filter(|&i| i != a)
+            .find(|&i| self.sources[i].settled() && self.sources[i].health == Health::Healthy)
+        else {
+            self.stale_candidates.clear();
+            return;
+        };
+        if !self.sources[a].settled() {
+            self.stale_candidates.clear();
+            return;
+        }
+        // When either connection is itself seconds behind the exchange the
+        // link is saturated; the lag is transport, and asking for snapshots
+        // would only add bytes to the queue. The latency warning covers it.
+        const SATURATED_US: f64 = 2_000_000.0;
+        if self.sources[a].lat_ewma_us > SATURATED_US || self.sources[b].lat_ewma_us > SATURATED_US {
+            self.stale_candidates.clear();
+            return;
+        }
+        let mut stale: Vec<Symbol> = Vec::new();
+        let mut next = HashMap::new();
+        for (sym, book_b) in &self.sources[b].books {
+            if !book_b.is_live() {
+                continue;
+            }
+            let Some(book_a) = self.sources[a].books.get(sym) else { continue };
+            if !book_a.is_live() || book_b.last_clock <= book_a.last_clock {
+                continue;
+            }
+            match self.stale_candidates.get(sym) {
+                Some(&seen) if seen == book_a.last_clock => stale.push(sym.clone()),
+                _ => {
+                    next.insert(sym.clone(), book_a.last_clock);
+                }
+            }
+        }
+        self.stale_candidates = next;
+        if stale.is_empty() {
+            return;
+        }
+        self.metrics.stale_books.add(stale.len() as u64);
+        let live = self.sources[a].live_count();
+        if stale.len() >= 10.max(live / 20) {
+            tracing::warn!(shard = self.id, source = a, n = stale.len(), live, "active source lags the standby on many books");
+            self.resync_source(a, "lagging the standby");
+            return;
+        }
+        tracing::warn!(shard = self.id, source = a, n = stale.len(), sample = ?&stale[..stale.len().min(3)], "books lag the standby; re-snapshotting them");
+        let s = &mut self.sources[a];
+        for sym in stale {
+            if let Some(book) = s.books.get_mut(&sym) {
+                book.mark_syncing();
+                s.syncing += 1;
+            }
+            s.to_snapshot.push_back(sym);
+        }
+    }
+
     fn health_check(&mut self) {
         let now = Instant::now();
         for s in &mut self.sources {
@@ -731,6 +815,7 @@ impl Engine {
                 self.resync_source(a, "silent while standby flows");
             }
         }
+        self.check_stale_books();
         self.maybe_failover();
         // Gauges describe the active source.
         let live = self.sources[self.active].live_count() as i64;

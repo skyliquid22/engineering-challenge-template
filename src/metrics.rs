@@ -58,6 +58,8 @@ pub struct Metrics {
     pub ws_errors: Counter,
     pub decode_errors: Counter,
     pub exchange_errors: Counter,
+    /// Books whose clock lagged the standby source's for 2 ticks (ext. 2).
+    pub stale_books: Counter,
     pub msgs_written: Counter,
     pub bytes_written: Counter,
     pub journal_lines: Counter,
@@ -151,6 +153,7 @@ impl Metrics {
                 ws_err = cur[10],
                 decode_err = cur[11],
                 exch_err = cur[12],
+                stale = cur[15],
                 mib_written = format_args!("{:.1}", cur[14] as f64 / 1048576.0),
                 symbols = self.symbols.get(),
                 live = self.books_live.get(),
@@ -166,7 +169,7 @@ impl Metrics {
         }
     }
 
-    fn counters(&self) -> [u64; 15] {
+    fn counters(&self) -> [u64; 16] {
         [
             self.frames.get(),
             self.bytes_in.get(),
@@ -183,6 +186,7 @@ impl Metrics {
             self.exchange_errors.get(),
             self.msgs_written.get(),
             self.bytes_written.get(),
+            self.stale_books.get(),
         ]
     }
 }
