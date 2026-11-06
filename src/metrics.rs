@@ -1,5 +1,6 @@
 //! Process-wide counters and gauges, logged every few seconds.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
@@ -43,6 +44,15 @@ impl Gauge {
     }
 }
 
+/// One shard's view of its symbols' update rates (extension 2, metric only).
+/// `buckets`: symbols with no applied update in the last 10 min, under 1/min,
+/// 1 to 10/min, over 10/min. `top`: its busiest symbols, updates per minute.
+#[derive(Clone, Debug, Default)]
+pub struct RateReport {
+    pub buckets: [u64; 4],
+    pub top: Vec<(String, f64)>,
+}
+
 #[derive(Default)]
 pub struct Metrics {
     pub frames: Counter,
@@ -73,6 +83,8 @@ pub struct Metrics {
     lat_send: Mutex<Vec<i64>>,
     /// received_at - ts_ms (exchange change time to our read), micros.
     lat_exch: Mutex<Vec<i64>>,
+    /// Latest per-shard rate report, merged by the logger.
+    rates: Mutex<HashMap<usize, RateReport>>,
 }
 
 const MAX_SAMPLES: usize = 400_000;
@@ -94,6 +106,25 @@ impl Metrics {
         if v.len() < MAX_SAMPLES {
             v.push(micros);
         }
+    }
+
+    pub fn report_rates(&self, shard: usize, report: RateReport) {
+        self.rates.lock().unwrap().insert(shard, report);
+    }
+
+    /// Sum of all shards' buckets and the five busiest symbols overall.
+    pub fn merged_rates(&self) -> RateReport {
+        let shards = self.rates.lock().unwrap();
+        let mut merged = RateReport::default();
+        for r in shards.values() {
+            for (m, b) in merged.buckets.iter_mut().zip(r.buckets.iter()) {
+                *m += b;
+            }
+            merged.top.extend(r.top.iter().cloned());
+        }
+        merged.top.sort_by(|a, b| b.1.total_cmp(&a.1));
+        merged.top.truncate(5);
+        merged
     }
 
     pub fn take_latencies(&self) -> (Vec<i64>, Vec<i64>) {
@@ -137,6 +168,13 @@ impl Metrics {
             } else {
                 rising_for = 0;
             }
+            let rates = self.merged_rates();
+            let top5 = rates
+                .top
+                .iter()
+                .map(|(sym, per_min)| format!("{sym}:{per_min:.1}/min"))
+                .collect::<Vec<_>>()
+                .join(",");
             tracing::info!(
                 target: "metrics",
                 frames_s = format_args!("{:.0}", rate(0)),
@@ -163,6 +201,11 @@ impl Metrics {
                 jq = self.journal_queue.get(),
                 lat_send_ms = %Percentiles::of(&ls),
                 lat_exch_ms = %Percentiles::of(&le),
+                rate_0 = rates.buckets[0],
+                rate_lt1 = rates.buckets[1],
+                rate_1to10 = rates.buckets[2],
+                rate_gt10 = rates.buckets[3],
+                top5 = %top5,
                 "metrics"
             );
             prev = cur;

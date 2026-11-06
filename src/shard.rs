@@ -29,7 +29,7 @@ use crate::book::{ApplyError, Book, level_update};
 use crate::exchange::kalshi::Kalshi;
 use crate::exchange::{Decoded, Event, Symbol};
 use crate::journal::{JournalLine, JournalSender};
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, RateReport};
 use crate::socket::{SocketCmd, SocketConfig, SocketMsg, run_socket};
 use crate::writer::{Out, OutSender};
 
@@ -81,6 +81,16 @@ const MIN_CHUNK: usize = 10;
 /// fast doubles it. Keeps roughly a second of snapshots in flight per socket
 /// whatever the link delivers.
 const CHUNK_TARGET: Duration = Duration::from_secs(1);
+/// A symbol with no applied update for this long counts as rate 0.
+const RATE_WINDOW: Duration = Duration::from_secs(600);
+
+/// Per-symbol update rate, metric only (extension 2). EMA of the
+/// inter-arrival time of applied updates on the active source.
+struct Rate {
+    ema_interval_us: f64,
+    last_update: Instant,
+    updates: u64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Health {
@@ -189,6 +199,8 @@ pub struct Engine {
     reported_syncing: i64,
     /// symbol -> active source's clock when it was first seen lagging the standby.
     stale_candidates: HashMap<Symbol, u64>,
+    rates: HashMap<Symbol, Rate>,
+    ticks: u64,
 }
 
 pub fn spawn_shard(
@@ -262,6 +274,8 @@ pub fn spawn_shard(
         reported_live: 0,
         reported_syncing: 0,
         stale_candidates: HashMap::new(),
+        rates: HashMap::new(),
+        ticks: 0,
     };
     let task = tokio::spawn(engine.run(cmd_rx, sock_rx, cancel));
     (ShardHandle { id, cmds: cmd_tx }, task)
@@ -355,6 +369,7 @@ impl Engine {
                 let mut removed = Vec::new();
                 for sym in symbols {
                     if self.symbols.remove(&sym) {
+                        self.rates.remove(&sym);
                         for s in &mut self.sources {
                             if let Some(b) = s.books.remove(&sym)
                                 && !b.is_live()
@@ -533,6 +548,7 @@ impl Engine {
                     Ok(qty) => {
                         if is_active {
                             self.metrics.deltas_applied.inc();
+                            self.note_update(&symbol);
                             self.emit(Out::Update(level_update(&symbol, side, price, qty, received_at, exchange_ts)));
                         }
                     }
@@ -791,8 +807,66 @@ impl Engine {
         }
     }
 
+    /// Update the symbol's inter-arrival EMA. Metric only; nothing is
+    /// resubscribed because of it (see README, extension 2).
+    fn note_update(&mut self, symbol: &str) {
+        let now = Instant::now();
+        match self.rates.get_mut(symbol) {
+            Some(r) => {
+                let dt = now.duration_since(r.last_update).as_micros() as f64;
+                r.ema_interval_us = if r.updates == 1 { dt } else { 0.8 * r.ema_interval_us + 0.2 * dt };
+                r.last_update = now;
+                r.updates += 1;
+            }
+            None => {
+                self.rates.insert(
+                    symbol.to_owned(),
+                    Rate { ema_interval_us: 0.0, last_update: now, updates: 1 },
+                );
+            }
+        }
+    }
+
+    /// Bucket every symbol by its current rate and hand the shard's view to
+    /// the metrics logger. A symbol with exactly one update in the window has
+    /// no interval yet and is counted as "under 1/min".
+    fn report_rates(&self) {
+        let now = Instant::now();
+        let mut report = RateReport::default();
+        for sym in &self.symbols {
+            let per_min = match self.rates.get(sym) {
+                Some(r) if now.duration_since(r.last_update) < RATE_WINDOW => {
+                    if r.updates >= 2 && r.ema_interval_us > 0.0 {
+                        Some(60_000_000.0 / r.ema_interval_us)
+                    } else {
+                        Some(0.0)
+                    }
+                }
+                _ => None,
+            };
+            match per_min {
+                None => report.buckets[0] += 1,
+                Some(r) if r < 1.0 => report.buckets[1] += 1,
+                Some(r) if r <= 10.0 => report.buckets[2] += 1,
+                Some(_) => report.buckets[3] += 1,
+            }
+            if let Some(r) = per_min
+                && r >= 1.0
+            {
+                report.top.push((sym.clone(), r));
+            }
+        }
+        report.top.sort_by(|a, b| b.1.total_cmp(&a.1));
+        report.top.truncate(5);
+        self.metrics.report_rates(self.id, report);
+    }
+
     fn health_check(&mut self) {
         let now = Instant::now();
+        self.ticks += 1;
+        if self.ticks.is_multiple_of(10) {
+            self.report_rates();
+        }
         for s in &mut self.sources {
             s.update_health();
         }
