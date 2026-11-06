@@ -84,6 +84,14 @@ pub struct Config {
     #[arg(long, default_value_t = 30)]
     pub silence_timeout_secs: u64,
 
+    /// Active source quiet this long while its standby flows = failover.
+    #[arg(long, default_value_t = 20)]
+    pub silence_window_secs: u64,
+
+    /// Planned full reconnect of every socket (extension 2); 0 disables.
+    #[arg(long, default_value_t = 21600)]
+    pub reconnect_every_secs: u64,
+
     /// Flush (pad + write a 64 MiB chunk) this often; 0 = only on rotation/exit.
     #[arg(long, default_value_t = 0)]
     pub flush_every_secs: u64,
@@ -120,6 +128,9 @@ impl Config {
     pub fn socket(&self) -> SocketConfig {
         SocketConfig {
             silence_timeout: Duration::from_secs(self.silence_timeout_secs.max(5)),
+            reconnect_every: (self.reconnect_every_secs > 0)
+                .then(|| Duration::from_secs(self.reconnect_every_secs)),
+            initial_offset: Duration::ZERO,
             initial_connect_delay: Duration::ZERO,
             max_backoff: Duration::from_secs(30),
         }
@@ -130,6 +141,7 @@ impl Config {
             redundancy: self.redundancy.max(1),
             socket: self.socket(),
             snapshot_every: Duration::from_secs(self.snapshot_every_secs.max(1)),
+            silence_window: Duration::from_secs(self.silence_window_secs.max(2)),
             journal: match self.journal {
                 JournalArg::Off => JournalMode::Off,
                 JournalArg::Active => JournalMode::Active,

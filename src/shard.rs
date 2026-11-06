@@ -53,6 +53,8 @@ pub struct ShardConfig {
     pub redundancy: usize,
     pub socket: SocketConfig,
     pub snapshot_every: Duration,
+    /// Active source silent this long while a standby is flowing = failover.
+    pub silence_window: Duration,
     pub journal: JournalMode,
     /// Largest subscribe / add_markets / get_snapshot request; each source
     /// adapts its own size to how fast the previous request arrived.
@@ -201,6 +203,9 @@ pub fn spawn_shard(
         let (tx, rx) = mpsc::unbounded_channel();
         let label = format!("shard{id}/{s}");
         let mut socket_cfg = cfg.socket.clone();
+        if let Some(every) = socket_cfg.reconnect_every {
+            socket_cfg.initial_offset = every * s as u32 / cfg.redundancy.max(1) as u32;
+        }
         socket_cfg.initial_connect_delay =
             cfg.stagger * id as u32 + cfg.stagger * s as u32 / cfg.redundancy.max(1) as u32;
         tokio::spawn(run_socket(
@@ -703,8 +708,28 @@ impl Engine {
     }
 
     fn health_check(&mut self) {
+        let now = Instant::now();
         for s in &mut self.sources {
             s.update_health();
+        }
+        // Extension 2: the active source went quiet while a standby is flowing.
+        // Only meaningful once neither side is waiting on snapshots.
+        if self.sources.len() > 1 {
+            let a = self.active;
+            let act = &self.sources[a];
+            let standby_flowing = self.sources.iter().enumerate().any(|(i, s)| {
+                i != a
+                    && s.settled()
+                    && s.health == Health::Healthy
+                    && s.last_frame.is_some_and(|t| now.duration_since(t) < Duration::from_secs(2))
+            });
+            let active_silent = act.settled()
+                && act.health == Health::Healthy
+                && act.last_frame.is_some_and(|t| now.duration_since(t) > self.cfg.silence_window);
+            if standby_flowing && active_silent {
+                tracing::warn!(shard = self.id, source = a, "active source silent while standby flows");
+                self.resync_source(a, "silent while standby flows");
+            }
         }
         self.maybe_failover();
         // Gauges describe the active source.

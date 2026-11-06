@@ -1,6 +1,7 @@
 //! One websocket connection, kept alive forever: connect with backoff, stamp
 //! every frame the instant it is read, answer pings, reconnect on silence,
-//! error or close.
+//! error, close, or a scheduled rotation (extension 2: a planned full
+//! reconnect clears whatever the exchange side has accumulated).
 //!
 //! The worker never blocks on anything but the socket itself: frames go to the
 //! engine over an unbounded channel so a slow consumer can never stall reads
@@ -12,6 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -48,6 +50,11 @@ pub struct SocketConfig {
     /// No frame of any kind (pings included) for this long means the
     /// connection is dead even if TCP says otherwise.
     pub silence_timeout: Duration,
+    /// Planned full reconnect (extension 2). Jittered +-10%.
+    pub reconnect_every: Option<Duration>,
+    /// Added to the first connection's rotation deadline so redundant
+    /// sockets of one shard never rotate together.
+    pub initial_offset: Duration,
     /// Wait this long before the very first connect, so dozens of shards do
     /// not all take their initial snapshot burst through one downlink at once.
     pub initial_connect_delay: Duration,
@@ -58,6 +65,8 @@ impl Default for SocketConfig {
     fn default() -> Self {
         Self {
             silence_timeout: Duration::from_secs(30),
+            reconnect_every: None,
+            initial_offset: Duration::ZERO,
             initial_connect_delay: Duration::ZERO,
             max_backoff: Duration::from_secs(30),
         }
@@ -119,7 +128,17 @@ pub async fn run_socket(
         if out.send(SocketMsg::Connected { source, conn }).is_err() {
             return;
         }
+        let deadline = cfg.reconnect_every.map(|d| {
+            let offset = if conn == 1 { cfg.initial_offset } else { Duration::ZERO };
+            Instant::now() + offset + jitter(d)
+        });
         let reason: String = loop {
+            let rotation = async {
+                match deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -174,6 +193,10 @@ pub async fn run_socket(
                         }
                     }
                 },
+                _ = rotation => {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break "scheduled reconnect".to_owned();
+                }
             }
         };
         metrics.sockets_connected.dec();
