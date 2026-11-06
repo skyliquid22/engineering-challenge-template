@@ -4,3 +4,4 @@
 *.jsonl
 /probe/symbols.txt
 __pycache__/
+.env
